@@ -1,62 +1,35 @@
-name: Docker Build
+name: Promote verified DeepRootGen image
 
 on:
   workflow_dispatch:
-  release:
-    types: [published]
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
 
 permissions:
-  contents: read
   packages: write
 
+concurrency:
+  group: deeprootgen-ghcr-latest-promotion
+  cancel-in-progress: false
+
 jobs:
-  build-docker:
+  promote:
+    if: github.repository == 'junqi108/deep-root-gen-PFR-open'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 10
+    env:
+      PACKAGE: ghcr.io/junqi108/deep-root-gen-pfr-open
+      SOURCE_TAG: sha-eaafc333c9cd44c2d00b73428e246ac56c12de34
+      EXPECTED: sha256:ba9273f5c543c5cf8dc82a1f5b545ec6bd5bd48ad474676b3f347b76f4a629df
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          persist-credentials: false
-
-      - name: Free disk space for locked application dependencies
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            /usr/local/share/powershell /usr/share/swift /usr/local/.ghcup
-          df -h .
-
-      - name: Build Dash and Prefect runtime image
-        env:
-          SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
-        run: |
-          image="ghcr.io/${GITHUB_REPOSITORY,,}:sha-${GITHUB_SHA}"
-          docker build --file dockerfiles/python/Dockerfile.local \
-            --label "org.opencontainers.image.source=$SOURCE_URL" \
-            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
-            --tag "$image" .
-          echo "DRG_IMAGE=$image" >> "$GITHUB_ENV"
-
-      - name: Verify schema-4 simulation inside the image
-        run: |
-          docker run --rm --network none \
-            --mount "type=bind,source=$PWD/examples/design/spatial_construction_synthetic.json,target=/tmp/spatial.json,readonly" \
-            "$DRG_IMAGE" sh -ec '
-              python -m deeprootgen simulate --config /tmp/spatial.json --outdir /tmp/simulation
-              for file in nodes.csv edges.csv branching.json row_alignment.json vine_origin_catalogue.json; do
-                test -s "/tmp/simulation/$file"
-              done
-            '
-
-      - name: Publish and verify the image digest
+      - name: Promote the verified manifest by digest
         env:
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          docker push "$DRG_IMAGE"
-          digest_ref="$(docker image inspect --format '{{index .RepoDigests 0}}' "$DRG_IMAGE")"
-          test "${digest_ref%@*}" = "${DRG_IMAGE%:*}"
-          docker manifest inspect "$digest_ref" > /dev/null
-          printf 'Published `%s`\n\nDigest `%s`\n' "$DRG_IMAGE" "$digest_ref" >> "$GITHUB_STEP_SUMMARY"
+          digest() {
+            docker buildx imagetools inspect "$1" | awk '$1 == "Digest:" {print $2; exit}'
+          }
+          test "$(digest "$PACKAGE:$SOURCE_TAG")" = "$EXPECTED"
+          docker buildx imagetools create --tag "$PACKAGE:latest" "$PACKAGE@$EXPECTED"
+          test "$(digest "$PACKAGE:latest")" = "$EXPECTED"
+          printf 'Published %s:latest at %s\n' "$PACKAGE" "$EXPECTED" >> "$GITHUB_STEP_SUMMARY"
